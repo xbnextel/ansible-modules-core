@@ -4,6 +4,7 @@
 # (c) 2012, Red Hat, Inc
 # Written by Seth Vidal <skvidal at fedoraproject.org>
 # (c) 2014, Epic Games, Inc.
+# (c) 2018 Nextel SA <nextel@nextel.es>
 #
 # This file is part of Ansible
 #
@@ -129,6 +130,20 @@ options:
     choices: ["yes", "no"]
     version_added: "2.1"
 
+  cve:
+    description:
+      - If "yes" the specified CVE (Common Vulnerabilities and Exposures) will be applied, accepts "latest" and "present" as states.
+    required: false
+    default: "no"
+    choices: ["yes", "no"]
+
+  advisory:
+    description:
+      - If "yes" the specified advisory will be applied, accepts "latest" and "present" as states.
+    required: false
+    default: "no"
+    choices: ["yes", "no"]
+
 notes:
   - When used with a loop of package names in a playbook, ansible optimizes
     the call to the yum module.  Instead of calling the module with a single
@@ -204,6 +219,18 @@ EXAMPLES = '''
   yum:
     name: "@^gnome-desktop-environment"
     state: present
+
+- name: install CVE-2018-7858
+  yum:
+    name: CVE-2018-7858
+    state: present
+    cve: yes
+
+- name: install CVE-2018-7858
+  yum:
+    name: CVE-2018-7858
+    state: present
+    cve: yes
 '''
 
 # 64k.  Number of bytes to read at a time when manually downloading pkgs via a url
@@ -801,7 +828,7 @@ def remove(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
 
     return res
 
-def latest(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
+def latest(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos, cve, advisory):
 
     res = {}
     res['results'] = []
@@ -848,6 +875,11 @@ def latest(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
         cmd = yum_basecmd + ['update']
         will_update = set(updates.keys())
         will_update_from_other_package = dict()
+    elif cve and [item for item in items if 'CVE' or 'cve' in item]:
+        cmd = yum_basecmd + ['update'] + ['--cve'] + [item]
+    elif advisory and [item for item in items if 'RHSA' or 'rhsa' or 'RHBA' or 'rhba' or 'RHEA' or 'rhea' in item]:
+        cmd = yum_basecmd + ['update'] + ['--advisory'] + [item]
+
     else:
         will_update = set()
         will_update_from_other_package = dict()
@@ -945,7 +977,7 @@ def latest(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
         else:
             rc2, out2, err2 = [0, '', '']
 
-    if not update_all:
+    if not update_all and not cve and not advisory:
         rc += rc2
         out += out2
         err += err2
@@ -960,7 +992,7 @@ def latest(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
     return res
 
 def ensure(module, state, pkgs, conf_file, enablerepo, disablerepo,
-           disable_gpg_check, exclude, repoq):
+           disable_gpg_check, exclude, repoq, cve, advisory):
 
     # fedora will redirect yum to dnf, which has incompatibilities
     # with how this module expects yum to operate. If yum-deprecated
@@ -1021,13 +1053,16 @@ def ensure(module, state, pkgs, conf_file, enablerepo, disablerepo,
     if state in ['installed', 'present']:
         if disable_gpg_check:
             yum_basecmd.append('--nogpgcheck')
-        res = install(module, pkgs, repoq, yum_basecmd, conf_file, en_repos, dis_repos)
+        if cve or advisory:
+            res = latest(module, pkgs, repoq, yum_basecmd, conf_file, en_repos, dis_repos, cve, advisory)
+        else:
+            res = install(module, pkgs, repoq, yum_basecmd, conf_file, en_repos, dis_repos)
     elif state in ['removed', 'absent']:
         res = remove(module, pkgs, repoq, yum_basecmd, conf_file, en_repos, dis_repos)
     elif state == 'latest':
         if disable_gpg_check:
             yum_basecmd.append('--nogpgcheck')
-        res = latest(module, pkgs, repoq, yum_basecmd, conf_file, en_repos, dis_repos)
+        res = latest(module, pkgs, repoq, yum_basecmd, conf_file, en_repos, dis_repos, cve, advisory)
     else:
         # should be caught by AnsibleModule argument_spec
         module.fail_json(msg="we should never get here unless this all"
@@ -1064,6 +1099,8 @@ def main():
             validate_certs=dict(required=False, default="yes", type='bool'),
             # this should not be needed, but exists as a failsafe
             install_repoquery=dict(required=False, default="yes", type='bool'),
+            cve=dict(required=False, type='bool'),
+            advisory=dict(required=False, type='bool')
         ),
         required_one_of = [['name','list']],
         mutually_exclusive = [['name','list']],
@@ -1104,8 +1141,10 @@ def main():
         enablerepo = params.get('enablerepo', '')
         disablerepo = params.get('disablerepo', '')
         disable_gpg_check = params['disable_gpg_check']
+        cve = params.get('cve', '')
+        advisory = params.get('advisory', '')
         results = ensure(module, state, pkg, params['conf_file'], enablerepo,
-                     disablerepo, disable_gpg_check, exclude, repoquery)
+                     disablerepo, disable_gpg_check, exclude, repoquery, cve, advisory)
         if repoquery:
             results['msg'] = '%s %s' % (results.get('msg',''),
                     'Warning: Due to potential bad behaviour with rhnplugin and certificates, used slower repoquery calls instead of Yum API.')
